@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import ipaddress
 import json
 import os
+import socket
 from pathlib import Path
 import subprocess
 import sys
@@ -48,7 +49,7 @@ def resolve_process(client):
     except (AttributeError, OSError, ValueError) as exc:
         raise CaptureError('screenshot_client_unavailable', 'Reconnect to the test client before taking a screenshot.') from exc
     local_ips = {_address(a.address) for addresses in psutil.net_if_addrs().values()
-                 for a in addresses if a.family in (2, 23, 10)}
+                 for a in addresses if a.family in (socket.AF_INET, socket.AF_INET6)}
     if not ipaddress.ip_address(peer_ip).is_loopback and peer_ip not in local_ips:
         raise CaptureError('screenshot_remote_client',
                            'Screenshots require the MCP server and the 1C client on the same computer.')
@@ -57,9 +58,10 @@ def resolve_process(client):
             return (n.status == psutil.CONN_ESTABLISHED and n.laddr and n.raddr
                     and (_address(n.laddr.ip), n.laddr.port) == (peer_ip, peer[1])
                     and (_address(n.raddr.ip), n.raddr.port) == (local_ip, local[1]))
-        if sys.platform == 'linux':
+        if sys.platform in ('linux', 'darwin'):
             # WebKit children inherit the client's socket. The system-wide listing
             # can attribute that shared inode to a child instead of the 1C process.
+            # macOS requires root for the system-wide connection list.
             matches = set()
             for p in psutil.process_iter(['name']):
                 if p.info['name'] not in ('1cv8', '1cv8c') or not p.is_running():
@@ -74,7 +76,7 @@ def resolve_process(client):
         if len(matches) != 1:
             raise CaptureError('screenshot_process_unavailable', 'The local process for this connection could not be identified.')
         process = psutil.Process(matches.pop())
-        names = ('1cv8', '1cv8c') if sys.platform == 'linux' else ('1cv8.exe', '1cv8c.exe')
+        names = ('1cv8.exe', '1cv8c.exe') if sys.platform == 'win32' else ('1cv8', '1cv8c')
         if process.name().lower() not in names:
             raise CaptureError('screenshot_process_unavailable', 'This connection could not be matched to a 1C client process.')
         return process.pid, process.create_time()

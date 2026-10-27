@@ -1,8 +1,8 @@
 # 1C Testpilot
 
 Форк [serezhenkov-lab/1c-testpilot](https://github.com/serezhenkov-lab/1c-testpilot)
-на основе [ROCTUP/1c-testpilot](https://github.com/ROCTUP/1c-testpilot), upstream 1.9.1
-(`e45c31beb2ce1c7b82499eb4fd4e888c799ec3fa`). Добавлен файловый транспорт для
+на основе [ROCTUP/1c-testpilot](https://github.com/ROCTUP/1c-testpilot), upstream 1.9.2
+(тег `v1.9.2`). Добавлен файловый транспорт для
 управления тестовым клиентом 1С в удалённом RDP-сеансе. Базовые MCP-инструменты,
 Python API и обычный запуск Testpilot сохраняются.
 
@@ -266,6 +266,8 @@ codex mcp add 1c-testpilot --url http://127.0.0.1:6004/mcp
   запуска клиента нужен графический сеанс; для подключения к уже запущенному — не нужен.
 - На macOS обычный запуск не требует `DISPLAY`; поиск платформы учитывает путь
   `/opt/1cv8/<версия>/`. `desktop="isolated"` и `get_screenshot` на macOS не поддерживаются.
+  Для отправки клавиш и открытия закрытой панели сообщений приложению, запускающему
+  Testpilot (терминалу, редактору), нужно разрешение «Универсальный доступ».
 - На Windows 10+ и Linux параметр `desktop="isolated"` в `launch_client` запускает 1С на отдельном
   рабочем столе, не мешая пользователю. По умолчанию — `desktop="default"`, обычный запуск.
   Изолированные клиенты поддерживают скриншоты и завершаются вместе с MCP-сервером.

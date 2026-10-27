@@ -20,9 +20,10 @@ SUPPORTED_KEYS = tuple('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') + tuple(
 
 
 class KeyboardError(RuntimeError):
-    def __init__(self, code, message):
+    def __init__(self, code, message, **details):
         super().__init__(message)
         self.code = code
+        self.details = details
 
 
 def combination(keys):
@@ -39,8 +40,8 @@ def combination(keys):
 
 
 def _local_process(client):
-    if sys.platform not in ('win32', 'linux'):
-        raise KeyboardError('keyboard_platform_unsupported', 'Local shortcuts require Windows or Linux with X11.')
+    if sys.platform not in ('win32', 'linux', 'darwin'):
+        raise KeyboardError('keyboard_platform_unsupported', 'Local shortcuts require Windows, Linux with X11 or macOS.')
     try:
         pid, created = resolve_process(client)
     except CaptureError as exc:
@@ -91,23 +92,28 @@ def activate_target(runtime, client, key, handle=None):
 
     def verify_window():
         active = runtime._window(client)
-        if not active.get('ok') or active.get('key') != window_key:
+        active_key = active.get('key')
+        # The main window can report its home page as the active window.
+        home_page = window_key.startswith('MainFrame[') and active_key == 'HomePage' + window_key[len('MainFrame'):]
+        if not active.get('ok') or (active_key != window_key and not home_page):
             raise KeyboardError('keyboard_window_not_active',
-                                'The addressed window did not become active. No keys were sent; inspect the active window.')
+                                'The addressed window did not become active. No keys were sent; inspect the active window.',
+                                expected_window=window_key, active_window=active_key)
+        return active_key
 
     activate(window_key)
-    verify_window()
+    active_window = verify_window()
     if cls == 'ManagedForm':
         activate(key, target['handle'])
-        verify_window()
+        active_window = verify_window()
     elif control:
         activate(key, target['handle'])
         verify_window()
         if runtime._input_current(client, form) != key:
             raise KeyboardError('keyboard_focus_not_confirmed',
                                 'The addressed control did not receive focus. No keys were sent; inspect the current element.')
-        verify_window()  # An inactive form can report its remembered current element.
-    return window_key
+        active_window = verify_window()  # An inactive form can report its remembered current element.
+    return active_window
 
 
 def send_shortcut(runtime, client, window_key, keys):
@@ -115,7 +121,8 @@ def send_shortcut(runtime, client, window_key, keys):
     pid, created = _local_process(client)
     active = runtime._window(client)
     if not active.get('ok') or active.get('key') != window_key:
-        raise KeyboardError('keyboard_window_not_active', 'Activate the addressed 1C window before sending a shortcut.')
+        raise KeyboardError('keyboard_window_not_active', 'Activate the addressed 1C window before sending a shortcut.',
+                            expected_window=window_key, active_window=active.get('key'))
     request = dict(pid=pid, created=created, keys=keys, title=active.get('title') or '')
     remaining = 5.0
     deadline = getattr(client, '_io_deadline', None)
@@ -150,11 +157,13 @@ def dispatch(request):
     try:
         request = dict(request, keys=combination(request['keys']))
         process = psutil.Process(request['pid'])
-        names = ('1cv8', '1cv8c') if sys.platform == 'linux' else ('1cv8.exe', '1cv8c.exe')
+        names = ('1cv8.exe', '1cv8c.exe') if sys.platform == 'win32' else ('1cv8', '1cv8c')
         if process.create_time() != request['created'] or process.name().lower() not in names:
             raise KeyboardError('keyboard_client_changed', 'The connected client process changed.')
         if sys.platform == 'win32':
             from _keyboard_windows import send
+        elif sys.platform == 'darwin':
+            from _keyboard_macos import send
         else:
             from _keyboard_linux import send
         send(request)
