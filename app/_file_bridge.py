@@ -13,7 +13,9 @@ import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 import time
+import traceback
 import uuid
 
 PROTOCOL = 1
@@ -24,6 +26,44 @@ PREFIX = 'tp_bridge_'
 
 class BridgeError(RuntimeError):
     pass
+
+
+def cleanup_io(action):
+    """Keep the original failure when the disconnected share also rejects cleanup."""
+    unwinding = sys.exc_info()[0] is not None
+    try:
+        action()
+    except OSError:
+        if not unwinding:
+            raise
+
+
+def io_failure(exc):
+    if isinstance(exc, BaseExceptionGroup):
+        return all(io_failure(child) for child in exc.exceptions)
+    return isinstance(exc, OSError)
+
+
+def report_worker_failure(exc, channel):
+    # The redirected drive is unavailable: diagnostics must stay on the terminal.
+    log = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                                         prefix='testpilot-worker-', suffix='.log',
+                                         delete=False) as stream:
+            traceback.print_exception(exc, file=stream)
+            log = stream.name
+    except OSError:
+        pass
+    print(f'Worker stopped: channel={channel}. File/transport I/O failed; '
+          'the RDP redirected drive may be disconnected or inaccessible.\n'
+          'Reconnect RDP, check the redirected drive, then run the worker startup script again.\n'
+          'Commands are NOT replayed. If a request was in progress, its outcome may be unknown; '
+          'check tp_bridge_status/result and 1C before repeating any action.', file=sys.stderr, flush=True)
+    if log:
+        print(f'Local diagnostic log: {log}', file=sys.stderr, flush=True)
+    else:
+        print('Local diagnostic log could not be written.', file=sys.stderr, flush=True)
 
 
 def identifier(value):
@@ -69,19 +109,25 @@ def atomic_json(path, value):
             try:
                 os.replace(temp, path)
                 break
-            except PermissionError:
+            except OSError as exc:
+                # RDP redirected drives can report ERROR_ALREADY_EXISTS (183)
+                # during replacement, in addition to temporary sharing denials.
+                # Retry the same publication; never unlink the existing target.
+                if not isinstance(exc, PermissionError) and getattr(exc, 'winerror', None) != 183:
+                    raise
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(delay)
                 delay = min(delay * 2, .25)
     finally:
-        temp.unlink(missing_ok=True)
+        cleanup_io(lambda: temp.unlink(missing_ok=True))
 
 
 @contextmanager
 def exclusive(path):
     """OS lock released on process exit, including on Windows/redirected drives."""
-    with Path(path).open('a+b') as stream:
+    stream = Path(path).open('a+b')
+    try:
         if stream.seek(0, 2) == 0:
             stream.write(b'0')
             stream.flush()
@@ -98,11 +144,15 @@ def exclusive(path):
         try:
             yield
         finally:
-            stream.seek(0)
-            if os.name == 'nt':
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            def unlock():
+                stream.seek(0)
+                if os.name == 'nt':
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            cleanup_io(unlock)
+    finally:
+        cleanup_io(stream.close)
 
 
 def envelope(value, channel, session=None, request=None):
@@ -298,7 +348,7 @@ class Worker:
                 if heartbeat:
                     heartbeat.cancel()
                     await asyncio.gather(heartbeat, return_exceptions=True)
-                self.publish(False)
+                cleanup_io(lambda: self.publish(False))
 
 
 async def serve(proxy):
@@ -352,6 +402,11 @@ def main(argv=None):
             asyncio.run(serve(Proxy(args.root, args.channel, args.timeout)))
     except KeyboardInterrupt:
         pass
+    except Exception as exc:
+        if args.mode != 'worker' or not io_failure(exc):
+            raise
+        report_worker_failure(exc, args.channel)
+        raise SystemExit(2) from None
 
 
 if __name__ == '__main__':
